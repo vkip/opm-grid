@@ -217,7 +217,8 @@ CpGrid::scatterGrid(EdgeWeightMethod method,
                     [[maybe_unused]] int partitionMethod,
                     double imbalanceTol,
                     [[maybe_unused]] bool allowDistributedWells,
-                    [[maybe_unused]] const std::vector<int>& input_cell_part)
+                    [[maybe_unused]] const std::vector<int>& input_cell_part,
+                    const std::vector<cpgrid::OpmWellType> * inactive_wells)
 {
     // Silence any unused argument warnings that could occur with various configurations.
     static_cast<void>(wells);
@@ -334,8 +335,8 @@ CpGrid::scatterGrid(EdgeWeightMethod method,
 #ifdef HAVE_ZOLTAN
                 std::tie(computedCellPart, wells_on_proc, exportList, importList, wellConnections)
                     = serialPartitioning
-                    ? cpgrid::zoltanSerialGraphPartitionGridOnRoot(*this, wells, possibleFutureConnections, transmissibilities, cc, method, 0, imbalanceTol, allowDistributedWells, partitioningParams)
-                    : cpgrid::zoltanGraphPartitionGridOnRoot(*this, wells, possibleFutureConnections, transmissibilities, cc, method, 0, imbalanceTol, allowDistributedWells, partitioningParams);
+                    ? cpgrid::zoltanSerialGraphPartitionGridOnRoot(*this, wells, possibleFutureConnections, transmissibilities, cc, method, 0, imbalanceTol, allowDistributedWells, partitioningParams, inactive_wells)
+                    : cpgrid::zoltanGraphPartitionGridOnRoot(*this, wells, possibleFutureConnections, transmissibilities, cc, method, 0, imbalanceTol, allowDistributedWells, partitioningParams, inactive_wells);
 #else
                 OPM_THROW(std::runtime_error, "Parallel runs depend on ZOLTAN if useZoltan is true. Please install!");
 #endif // HAVE_ZOLTAN

@@ -145,7 +145,7 @@ private:
 /// \param cpGrid The unbalanced grid we compute on.
 /// \return On the rank that has the global grid a vector with the well
 ///         indices for process i at index i.
-std::vector<std::vector<int> >
+std::vector<std::unordered_set<int> >
 perforatingWellIndicesOnProc(const std::vector<int>& parts,
                   const std::vector<Dune::cpgrid::OpmWellType>& wells,
                   const std::unordered_map<std::string, std::set<int>>& possibleFutureConnections,
@@ -168,7 +168,7 @@ perforatingWellIndicesOnProc(const std::vector<int>& parts,
 /// \param cc Information about the parallelism together with the decomposition.
 /// \return On rank 0 a vector with the well indices for process i
 ///         at index i.
-std::vector<std::vector<int> >
+std::vector<std::unordered_set<int> >
 postProcessPartitioningForWells(std::vector<int>& parts,
                                 std::function<int(int)> gid,
                                 const std::vector<OpmWellType>&  wells,
@@ -187,8 +187,8 @@ postProcessPartitioningForWells(std::vector<int>& parts,
 /// \return Vector of pairs of well name and a boolean indicating whether the
 ///         well with this name perforates cells here. Sorted by well name!
 std::vector<std::pair<std::string,bool>>
-computeParallelWells(const std::vector<std::vector<int> >& wells_on_proc,
-                     const std::vector<OpmWellType>&  wells,
+computeParallelWells(const std::vector<std::unordered_set<int> >& wells_on_proc,
+                     const std::vector<std::reference_wrapper<const OpmWellType> >&  wells,
                      const Communication<MPI_Comm>& cc,
                      int root);
 #endif

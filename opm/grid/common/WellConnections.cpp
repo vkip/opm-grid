@@ -134,47 +134,43 @@ void WellConnections::init([[maybe_unused]] const std::vector<OpmWellType>& well
 }
 
 #ifdef HAVE_MPI
-std::vector<std::vector<int> >
+std::vector<std::unordered_set<int> >
 perforatingWellIndicesOnProc(const std::vector<int>& parts,
                              const std::vector<Dune::cpgrid::OpmWellType>& wells,
                              const std::unordered_map<std::string, std::set<int>>& possibleFutureConnections,
                              const CpGrid& cpGrid)
 {
     auto numProcs = cpGrid.comm().size();
-    std::vector<std::vector<int> > wellIndices(numProcs);
+    std::vector<std::unordered_set<int> > wellIndices(numProcs);
 
-    if (cpGrid.numCells())
+    // Only root process will have cells at this point
+    if (!cpGrid.numCells())
     {
-        // root process that has global cells
-        WellConnections wellConnections(wells, possibleFutureConnections, cpGrid);
-        if (!wellConnections.size())
-        {
-            return wellIndices;
-        }
-        // prevent memory allocation
-        for (auto &well_indices : wellIndices) {
-            well_indices.reserve(wells.size());
-        }
+        return wellIndices;
+    }
 
-        for (std::size_t wellIndex = 0; wellIndex < wells.size(); ++wellIndex) {
-            const auto &connections = wellConnections[wellIndex];
-            std::map<int, std::size_t> connectionsOnProc;
-            for (const auto& connection_index : connections) {
-                ++connectionsOnProc[parts[connection_index]];
-            }
+    WellConnections wellConnections(wells, possibleFutureConnections, cpGrid);
+    if (!wellConnections.size())
+    {
+        return wellIndices;
+    }
 
-            for (const auto& entry: connectionsOnProc)
-            {
-                if (entry.second > 0) // Should be unnecessary
-                {
-                    wellIndices[entry.first].push_back(wellIndex);
-                }
-            }
+    // prevent memory allocation
+    for (auto &well_indices : wellIndices) {
+        well_indices.reserve(wells.size());
+    }
+
+    const auto nwells = wells.size();
+    for (auto wno = 0*nwells; wno < nwells; ++wno) {
+        for (const auto conn_compressed_index : wellConnections[wno]) {
+            wellIndices[parts[conn_compressed_index]].insert(wno);
         }
     }
+
     return wellIndices;
 }
-std::vector<std::vector<int> >
+
+std::vector<std::unordered_set<int> >
 postProcessPartitioningForWells(std::vector<int>& parts,
                                 [[maybe_unused]] std::function<int(int)> gid,
                                 [[maybe_unused]] const std::vector<OpmWellType>& wells,
@@ -190,7 +186,7 @@ postProcessPartitioningForWells(std::vector<int>& parts,
     cc.allgather(&noCells, 1, cellsPerProc.data());
 
     // Contains for each process the indices of the wells assigned to it.
-    std::vector<std::vector<int> > well_indices_on_proc(no_procs);
+    std::vector<std::unordered_set<int> > well_indices_on_proc(no_procs);
 
 #if HAVE_ECL_INPUT
     const auto& mpiType =  MPITraits<std::size_t>::getType();
@@ -209,9 +205,10 @@ postProcessPartitioningForWells(std::vector<int>& parts,
         }
 
         // prevent memory allocation
-        for (auto &well_indices : well_indices_on_proc) {
-            well_indices.reserve(wells.size());
-        }
+        // Done below...????
+        // for (auto &well_indices : well_indices_on_proc) {
+        //     well_indices.reserve(wells.size());
+        // }
 
         // Check that all connections of a well have ended up on one process.
         // If that is not the case for well then move them manually to the
@@ -319,7 +316,7 @@ postProcessPartitioningForWells(std::vector<int>& parts,
                 continue;
             } else {
                 int new_owner = parts[*connections.begin()];
-                well_indices_on_proc[new_owner].push_back(well_index);
+                well_indices_on_proc[new_owner].insert(well_index);
                 const auto& old_owners_well = old_owners[well_index];
                 if (old_owners_well.size() > 1 || old_owners_well.find(new_owner) == old_owners_well.end()) {
                     ::Opm::OpmLog::info("Manually moved well " + well.name() + " to partition "
@@ -451,8 +448,8 @@ postProcessPartitioningForWells(std::vector<int>& parts,
 }
 
 std::vector<std::pair<std::string,bool>>
-computeParallelWells([[maybe_unused]] const std::vector<std::vector<int> >& wells_on_proc,
-                     [[maybe_unused]] const std::vector<OpmWellType>& wells,
+computeParallelWells([[maybe_unused]] const std::vector<std::unordered_set<int> >& wells_on_proc,
+                     [[maybe_unused]] const std::vector<std::reference_wrapper<const OpmWellType> >& wells,
                      [[maybe_unused]] const Communication<MPI_Comm>& cc,
                      [[maybe_unused]] int root)
 {
@@ -467,15 +464,21 @@ computeParallelWells([[maybe_unused]] const std::vector<std::vector<int> >& well
     if( root == cc.rank() )
     {
         std::vector<MPI_Request> reqs(cc.size(), MPI_REQUEST_NULL);
-        my_well_indices = wells_on_proc[root];
         for ( int i=0; i < cc.size(); ++i )
         {
+            const auto& wells_on_root = wells_on_proc[i];
             if(i==root)
             {
+                my_well_indices.reserve(wells_on_root.size());
+                for (const auto& wno : wells_on_root) my_well_indices.push_back(wno);
                 continue;
             }
-            MPI_Isend(const_cast<int*>(wells_on_proc[i].data()),
-                      wells_on_proc[i].size(),
+
+            std::vector<int> tmp_indices;
+            tmp_indices.reserve(wells_on_root.size());
+            for (const auto& wno : wells_on_root) tmp_indices.push_back(wno);
+            MPI_Isend(const_cast<int*>(tmp_indices.data()),
+                      tmp_indices.size(),
                       MPI_INT, i, well_information_tag, cc, &reqs[i]);
         }
         std::vector<MPI_Status> stats(reqs.size());
@@ -485,8 +488,9 @@ computeParallelWells([[maybe_unused]] const std::vector<std::vector<int> >& well
         std::size_t sizes[2] = {wells.size(),0};
         int wellMessageSize = 0;
         MPI_Pack_size(2, MPITraits<std::size_t>::getType(), cc, &wellMessageSize);
-        for(const auto& well: wells)
+        for(const auto& well_ref: wells)
         {
+            const auto& well = well_ref.get();
             int size;
             MPI_Pack_size(well.name().size() + 1, MPI_CHAR, cc, &size); // +1 for '\0' delimiter
             sizes[1] += well.name().size() + 1;
@@ -498,8 +502,9 @@ computeParallelWells([[maybe_unused]] const std::vector<std::vector<int> >& well
         std::vector<char> buffer(wellMessageSize);
         int pos = 0;
         MPI_Pack(&sizes, 2, MPITraits<std::size_t>::getType(), buffer.data(), wellMessageSize, &pos, cc);
-        for(const auto& well: wells)
+        for(const auto& well_ref: wells)
         {
+            const auto& well = well_ref.get();
             MPI_Pack(well.name().c_str(), well.name().size()+1, MPI_CHAR, buffer.data(),
                      wellMessageSize, &pos, cc); // +1 for '\0' delimiter
             globalWellNames.push_back(well.name());

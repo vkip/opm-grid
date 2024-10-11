@@ -21,6 +21,9 @@
 #include <config.h>
 #endif
 #if HAVE_MPI // no code in this file without MPI. Skip includes-
+#include <opm/input/eclipse/Schedule/Well/Well.hpp>
+#include <opm/input/eclipse/Schedule/Well/WellConnections.hpp>
+
 #include <opm/grid/common/ZoltanPartition.hpp>
 #include <opm/grid/utility/OpmWellType.hpp>
 #include <opm/grid/cpgrid/CpGridData.hpp>
@@ -52,12 +55,13 @@ makeImportAndExportLists(const Dune::CpGrid& cpgrid,
                          const Id* exportGlobalGids,
                          const int* exportToPart,
                          const Id* importGlobalGids,
-                         bool allowDistributedWells) {
+                         bool allowDistributedWells,
+                         const std::vector<Dune::cpgrid::OpmWellType> * inactive_wells) {
 
     int                         size = cpgrid.numCells();
     int                         rank  = cc.rank();
     std::vector<int>            parts(size, rank);
-    std::vector<std::vector<int> > wellsOnProc;
+    std::vector<std::unordered_set<int> > wellsOnProc;
 
     // List entry: process to export to, (global) index, process rank, attribute there (not needed?)
     std::vector<std::tuple<int,int,char>> myExportList(numExport);
@@ -148,11 +152,42 @@ makeImportAndExportLists(const Dune::CpGrid& cpgrid,
         }
     }
 
+
+    //const auto nwells = inactive_wells ? inactive_wells->size() + wells->size() : wells->size();
+    std::vector<std::reference_wrapper<const Dune::cpgrid::OpmWellType>> all_well_refs(wells->begin(), wells->end());
+    //all_well_refs.reserve(nwells);
+    //for (const auto& well : *wells) all_well_refs.push_back(well);
+
+    if (inactive_wells) {
+        if ( rank == root ) {
+            const auto& cpgdim = cpgrid.logicalCartesianSize();
+            std::vector<int> cartesian_to_compressed(cpgdim[0]*cpgdim[1]*cpgdim[2], -1);
+            for( int i=0; i < cpgrid.numCells(); ++i ) cartesian_to_compressed[cpgrid.globalCell()[i]] = i;
+            auto wno = wells->size();
+            for (const auto& well : *inactive_wells)
+            {
+                all_well_refs.push_back(std::ref(well));
+                for (const auto& conn : well.getConnections())
+                {
+                    const int compressed_index = cartesian_to_compressed[conn.global_index()];
+                    if (compressed_index >= 0) {
+                        const int wpart = parts[compressed_index];
+                        wellsOnProc[wpart].insert(wno);
+                    }
+                }
+                ++wno;
+            }
+            std::vector<int>().swap(cartesian_to_compressed); // free memory.
+        } else {
+            assert (parts.size() == 0);
+        }
+    }
+
     std::vector<std::pair<std::string,bool>> parallel_wells;
     if( wells )
     {
         parallel_wells = Dune::cpgrid::computeParallelWells(wellsOnProc,
-                                                            *wells,
+                                                            all_well_refs,
                                                             cc,
                                                             root);
     }
@@ -251,7 +286,8 @@ makeImportAndExportLists(const Dune::CpGrid&,
                          const int*,
                          const int*,
                          const int*,
-                         bool);
+                         bool,
+                         const std::vector<Dune::cpgrid::OpmWellType>*);
 
 template
 std::tuple<int, std::vector<int> >
@@ -298,7 +334,8 @@ zoltanGraphPartitionGridOnRoot(const CpGrid& cpgrid,
                                int root,
                                const double zoltanImbalanceTol,
                                bool allowDistributedWells,
-                               const std::map<std::string,std::string>& params)
+                               const std::map<std::string,std::string>& params,
+                               const std::vector<OpmWellType> * inactive_wells)
 {
     int rc = ZOLTAN_OK - 1;
     float ver = 0;
@@ -369,7 +406,8 @@ zoltanGraphPartitionGridOnRoot(const CpGrid& cpgrid,
                                      exportGlobalGids,
                                      exportProcs,
                                      importGlobalGids,
-                                     allowDistributedWells);
+                                     allowDistributedWells,
+                                     inactive_wells);
     Zoltan_LB_Free_Part(&exportGlobalGids, &exportLocalGids, &exportProcs, &exportToPart);
     Zoltan_LB_Free_Part(&importGlobalGids, &importLocalGids, &importProcs, &importToPart);
     Zoltan_Destroy(&zz);
@@ -394,7 +432,8 @@ public:
                             const double _zoltanImbalanceTol,
                             bool _allowDistributedWells,
                             int _numParts,
-                            const std::map<std::string,std::string>& param)
+                            const std::map<std::string,std::string>& param,
+                            const std::vector<OpmWellType> * _inactive_wells)
         : cpgrid(_cpgrid)
         , wells(_wells)
         , possibleFutureConnections(_possibleFutureConnections)
@@ -406,6 +445,7 @@ public:
         , allowDistributedWells(_allowDistributedWells)
         , numParts(_numParts)
         , params(param)
+        , inactive_wells(_inactive_wells)
     {
         if (wells) {
             const bool partitionIsEmpty = cc.rank() != root;
@@ -467,7 +507,8 @@ public:
                                         exportGlobalGids,
                                         exportToPart,
                                         importGlobalGids,
-                                        allowDistributedWells);
+                                        allowDistributedWells,
+                                        inactive_wells);
     }
 
     ~ZoltanSerialPartitioner()
@@ -570,6 +611,7 @@ private:
     bool allowDistributedWells;
     int numParts;
     const std::map<std::string,std::string>& params;
+    const std::vector<OpmWellType>* inactive_wells;
 };
 
 
@@ -587,10 +629,11 @@ zoltanSerialGraphPartitionGridOnRoot(const CpGrid& cpgrid,
                                      int root,
                                      const double zoltanImbalanceTol,
                                      bool allowDistributedWells,
-                                     const std::map<std::string,std::string>& params)
+                                     const std::map<std::string,std::string>& params,
+                                     const std::vector<OpmWellType> * inactive_wells)
 {
     ZoltanSerialPartitioner partitioner(cpgrid, wells, possibleFutureConnections, transmissibilities, cc, edgeWeightsMethod,
-                                        root, zoltanImbalanceTol, allowDistributedWells, 0, params);
+                                        root, zoltanImbalanceTol, allowDistributedWells, 0, params, inactive_wells);
     return partitioner.partition();
 }
 
@@ -609,7 +652,7 @@ zoltanGraphPartitionGridForJac(const CpGrid& cpgrid,
     std::map<std::string,std::string> params;
 
     ZoltanSerialPartitioner partitioner(cpgrid, wells, possibleFutureConnections, transmissibilities, cc, edgeWeightsMethod,
-                                        root, zoltanImbalanceTol, false, numParts, params);
+                                        root, zoltanImbalanceTol, false, numParts, params, nullptr);
     return partitioner.partitionForInfo();
 }
 

@@ -1299,10 +1299,11 @@ namespace Dune
                     const double* transmissibilities = nullptr, bool ownersFirst=false,
                     bool addCornerCells=false, int overlapLayers=1, int partitionMethod = Dune::PartitionMethod::zoltan,
                     double imbalanceTol = 1.1,
-                    bool allowDistributedWells = false)
+                    bool allowDistributedWells = false,
+                    const std::vector<cpgrid::OpmWellType> * inactive_wells = nullptr)
         {
             auto ret = scatterGrid(method, ownersFirst, wells, possibleFutureConnections, serialPartitioning, transmissibilities,
-                                   addCornerCells, overlapLayers, partitionMethod, imbalanceTol, allowDistributedWells);
+                                   addCornerCells, overlapLayers, partitionMethod, imbalanceTol, allowDistributedWells, {}, inactive_wells);
             using std::get;
             if (get<0>(ret))
             {
@@ -1790,7 +1791,8 @@ namespace Dune
                     int partitionMethod = Dune::PartitionMethod::zoltan,
                     double imbalanceTol = 1.1,
                     bool allowDistributedWells = true,
-                    const std::vector<int>& input_cell_part = {});
+                    const std::vector<int>& input_cell_part = {},
+                    const std::vector<cpgrid::OpmWellType> * inactive_wells = nullptr);
 
         /** @brief The data stored in the grid.
          *

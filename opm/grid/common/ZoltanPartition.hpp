@@ -81,7 +81,8 @@ makeImportAndExportLists(const Dune::CpGrid& cpgrid,
                          const Id* exportGlobalGids,
                          const int* exportToPart,
                          const Id* importGlobalGids,
-                         bool allowDistributedWells = false);
+                         bool allowDistributedWells = false,
+                         const std::vector<Dune::cpgrid::OpmWellType> * inactive_wells = nullptr);
 
 template<class Id>
 std::tuple<int, std::vector<Id> >
@@ -141,7 +142,8 @@ zoltanGraphPartitionGridOnRoot(const CpGrid& grid,
                                EdgeWeightMethod edgeWeightsMethod, int root,
                                const double zoltanImbalanceTol,
                                bool allowDistributedWells,
-                               const std::map<std::string,std::string>& params);
+                               const std::map<std::string,std::string>& params,
+                               const std::vector<OpmWellType> * inactive_wells);
 
 /// \brief Partition a CpGrid using Zoltan serially only on rank 0
 ///
@@ -188,7 +190,8 @@ zoltanSerialGraphPartitionGridOnRoot(const CpGrid& grid,
                                EdgeWeightMethod edgeWeightsMethod, int root,
                                const double zoltanImbalanceTol,
                                bool allowDistributedWells,
-                               const std::map<std::string,std::string>& params);
+                               const std::map<std::string,std::string>& params,
+                               const std::vector<OpmWellType> * inactive_wells);
 
 /// \brief Partition a CpGrid using Zoltan
 ///
