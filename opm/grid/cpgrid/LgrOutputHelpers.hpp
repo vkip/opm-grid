@@ -322,6 +322,14 @@ void Opm::Lgr::extractRestartValueLevelGrids(const Grid& grid,
                 // grid.leafGridView().size(0)
                 continue; // skip it
             }
+            if (leafVector.size() != static_cast<std::size_t>(grid.leafGridView().size(0))) {
+                // Not a cell vector, e.g. THRESHPR with one value per pair of
+                // equilibration regions: the same for every level grid.
+                for (int level = 0; level <= maxLevel; ++level) {
+                    restartValue_levels[level].addExtra(rst_key.key, rst_key.dim, std::vector<double>(leafVector));
+                }
+                continue;
+            }
             Opm::Lgr::populateDataVectorLevelGrids<double>(grid,
                                                            maxLevel,
                                                            leafVector,
