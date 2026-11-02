@@ -39,8 +39,8 @@ namespace Refinement
 /// keeps COORD/ZCORN only until it is refined.
 ///
 /// Restrictions (throw): an unrefined starting grid; in parallel each box must be
-/// rank-interior; boxes that touch, in IJK or across a fault, need in-face
-/// subdivisions that nest; graded boxes may not touch another box.
+/// rank-interior; boxes that touch across a fault need in-face subdivisions
+/// that nest; graded boxes may not touch another box.
 class ConformingBlockBuilder : public Builder
 {
 public:

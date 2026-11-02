@@ -827,6 +827,20 @@ assembleLeafGrid(std::vector<std::shared_ptr<CpGridData>>& storage,
     // in its cell as the second side (the same mechanism as a coarse
     // mosaic neighbor, only the outside cell is refined).
     std::map<std::vector<int>, int> sharedBoundaryFaceLeaf; // corner set -> owner leaf face
+    // Boundary faces of a box toward a face-sharing box whose in-face subdivisions
+    // do not nest (e.g. 9 against 6, or each side finer in a different direction).
+    // Neither side keeps its faces there; the overlay of both subdivisions is built
+    // with the synthetic faces below. Recorded on the side of the lower box index.
+    struct OverlayFace
+    {
+        int box;
+        int cell;                                // level cell of `box`
+        int axis;
+        int side;                                // -1 low, +1 high side of the cell
+        int neighborParent;                      // parent cell across, refined by neighborBox
+        int neighborBox;
+    };
+    std::vector<OverlayFace> overlayFaces;
 
     // Per box: refined (box-global) Cartesian index -> level cell index. Used by
     // the compatible sub-face mosaic below to find, for a finer box's boundary
@@ -1068,15 +1082,22 @@ assembleLeafGrid(std::vector<std::shared_ptr<CpGridData>>& storage,
                             sharedBoundaryFaceLeaf.emplace(key, static_cast<int>(leafFaces.size()));
                         }
                         else {
-                            // Compatible different subdivisions (guard-enforced:
-                            // one box is uniformly finer). The finer side emits
-                            // every sub-face and references the coarser side's
-                            // covering cell as the outside; the coarser side
-                            // suppresses its interface faces, so its interface
-                            // cells become >6-face hexes tiled by the finer
-                            // sub-faces (a sub-face mosaic).
-                            const bool thisFiner = (facA[u] >= facB[u] && facA[v] >= facB[v]);
-                            if (!thisFiner) {
+                            // Different subdivisions. If one side is finer by whole
+                            // multiples in both in-face directions, it emits every
+                            // sub-face and references the coarser side's covering
+                            // cell as the outside; the coarser side suppresses its
+                            // interface faces, so its interface cells become >6-face
+                            // hexes tiled by the finer sub-faces (a sub-face mosaic).
+                            // Otherwise both sides are cut along both subdivisions.
+                            const bool thisNests = (facA[u] % facB[u] == 0) && (facA[v] % facB[v] == 0);
+                            const bool otherNests = (facB[u] % facA[u] == 0) && (facB[v] % facA[v] == 0);
+                            if (!thisNests && !otherNests) {
+                                if (b < nbBox) {
+                                    overlayFaces.push_back({b, cell, axis, side, neighbor, nbBox});
+                                }
+                                continue;
+                            }
+                            if (!thisNests) {
                                 continue;       // coarser side: the finer references us
                             }
                             // Sub-position of this finer cell within its parent;
@@ -1159,7 +1180,7 @@ assembleLeafGrid(std::vector<std::shared_ptr<CpGridData>>& storage,
     };
     std::vector<SyntheticFace> syntheticFaces;
     std::vector<std::array<int,2>> splitKeys;    // {box, ordinal} per leaf corner past the history
-    if (!faultedSides.empty() || !interiorFaults.empty()) {
+    if (!faultedSides.empty() || !interiorFaults.empty() || !overlayFaces.empty()) {
         // coord -> leaf corner index, over the current pool (exact match: the
         // box-boundary corners are produced by identical resampling arithmetic).
         std::map<std::array<double,3>, int> cornerByCoord;
@@ -1396,6 +1417,114 @@ assembleLeafGrid(std::vector<std::shared_ptr<CpGridData>>& storage,
                     }
                 }
                 addPiece(b, cit->second, boxLeaf, neighborLeaf, axis, side, conn.faceNodes);
+            }
+        }
+
+        // Face-sharing boxes whose in-face subdivisions do not nest: one piece per
+        // pair of refined cells whose sub-faces overlap. Positions on the shared
+        // parent face are exact fractions; in each direction the common unit is
+        // 1/(fA*fB), so A's breakpoints are multiples of fB and B's of fA. Piece
+        // corners that are corners of A's or B's cells are those leaf corners; the
+        // others lie on an edge of A's cell and are interpolated along it.
+        for (const auto& of : overlayFaces) {
+            const BoxData& boxA = boxes[of.box];
+            const BoxData& boxB = boxes[of.neighborBox];
+            const int axis = of.axis;
+            const int u = (axis == 0) ? 1 : 0;
+            const int v = (axis == 2) ? 1 : 2;
+            const int leafA = leafIdxOfLevelCell[of.box][of.cell];
+            if (leafA < 0) {
+                continue;
+            }
+            const auto& cellToPointA = GridStateWriter::cellToPoint(*boxA.level);
+            const auto& cellToPointB = GridStateWriter::cellToPoint(*boxB.level);
+            const auto& rdA = boxA.refinedDims;
+            const int cartA = boxA.level->globalCell()[of.cell];
+            const std::array<int,3> latA = { cartA % rdA[0], (cartA / rdA[0]) % rdA[1],
+                                             cartA / (rdA[0]*rdA[1]) };
+            const std::array<int,2> fA = { boxA.factors[u], boxA.factors[v] };
+            const std::array<int,2> fB = { boxB.factors[u], boxB.factors[v] };
+            const std::array<int,2> sA = { latA[u] % fA[0], latA[v] % fA[1] };
+
+            const int sideBitA = (of.side > 0) ? 1 : 0;
+            const auto cornerA = [&](int bu, int bv) {
+                const int slot = (sideBitA << axis) | (bu << u) | (bv << v);
+                return boxA.cornerToLeaf[cellToPointA[of.cell][slot ^ boxA.cornerMask]];
+            };
+            const auto between = [&](int p0, int p1, double t) {
+                const auto x0 = leafCorners[p0].center();
+                const auto x1 = leafCorners[p1].center();
+                std::array<double,3> x{};
+                for (int d = 0; d < 3; ++d) {
+                    x[d] = x0[d] + t * (x1[d] - x0[d]);
+                }
+                return poolCorner(x);
+            };
+
+            const std::array<int,3> nijk = parentIJK(of.neighborBox, of.neighborParent);
+            const auto& startB = requests[of.neighborBox].startIJK;
+            const auto& rdB = boxB.refinedDims;
+            for (int tv = 0; tv < fB[1]; ++tv) {
+                for (int tu = 0; tu < fB[0]; ++tu) {
+                    const std::array<int,2> tB = { tu, tv };
+                    // Overlap in units of 1/(fA*fB) per direction
+                    std::array<int,2> lo{}, hi{};
+                    bool overlaps = true;
+                    for (int d = 0; d < 2; ++d) {
+                        lo[d] = std::max(sA[d] * fB[d], tB[d] * fA[d]);
+                        hi[d] = std::min((sA[d] + 1) * fB[d], (tB[d] + 1) * fA[d]);
+                        overlaps = overlaps && (hi[d] > lo[d]);
+                    }
+                    if (!overlaps) {
+                        continue;
+                    }
+
+                    std::array<int,3> subB{};
+                    subB[axis] = (of.side > 0) ? 0 : (boxB.factors[axis] - 1);
+                    subB[u] = tu;
+                    subB[v] = tv;
+                    std::array<int,3> latB{};
+                    for (int c = 0; c < 3; ++c) {
+                        latB[c] = (nijk[c] - startB[c]) * boxB.factors[c] + subB[c];
+                    }
+                    const auto cit = refinedCartToCell[of.neighborBox].find(
+                        latB[0] + rdB[0]*latB[1] + rdB[0]*rdB[1]*latB[2]);
+                    const int cellB = (cit != refinedCartToCell[of.neighborBox].end()) ? cit->second : -1;
+                    const int leafB = (cellB >= 0) ? leafIdxOfLevelCell[of.neighborBox][cellB] : -1;
+                    const auto cornerB = [&](int bu, int bv) {
+                        const int slot = ((1 - sideBitA) << axis) | (bu << u) | (bv << v);
+                        return boxB.cornerToLeaf[cellToPointB[cellB][slot ^ boxB.cornerMask]];
+                    };
+
+                    const auto corner = [&](int pu, int pv) {
+                        const std::array<int,2> p = { pu, pv };
+                        bool onA[2], onB[2];
+                        for (int d = 0; d < 2; ++d) {
+                            onA[d] = (p[d] % fB[d]) == 0;
+                            onB[d] = (p[d] % fA[d]) == 0;
+                        }
+                        if (onA[0] && onA[1]) {
+                            return cornerA(pu == (sA[0] + 1) * fB[0], pv == (sA[1] + 1) * fB[1]);
+                        }
+                        if (onB[0] && onB[1] && cellB >= 0) {
+                            return cornerB(pu == (tu + 1) * fA[0], pv == (tv + 1) * fA[1]);
+                        }
+                        if (onA[0]) {
+                            const int bu = (pu == (sA[0] + 1) * fB[0]);
+                            const double t = static_cast<double>(pv - sA[1] * fB[1]) / fB[1];
+                            return between(cornerA(bu, 0), cornerA(bu, 1), t);
+                        }
+                        const int bv = (pv == (sA[1] + 1) * fB[1]);
+                        const double t = static_cast<double>(pu - sA[0] * fB[0]) / fB[0];
+                        return between(cornerA(0, bv), cornerA(1, bv), t);
+                    };
+
+                    auto& group = faceGroups[std::make_tuple(leafA, leafB, axis, of.side)];
+                    group.box = of.box;
+                    group.boxCellLevel = of.cell;
+                    group.pieces.push_back({ corner(lo[0], lo[1]), corner(hi[0], lo[1]),
+                                             corner(hi[0], hi[1]), corner(lo[0], hi[1]) });
+                }
             }
         }
 

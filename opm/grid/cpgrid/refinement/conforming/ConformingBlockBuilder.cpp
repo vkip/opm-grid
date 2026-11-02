@@ -171,115 +171,15 @@ void ConformingBlockBuilder::build(Dune::CpGrid& grid,
     if (grid.maxLevel() != 0) {
         OPM_THROW(std::logic_error, "ConformingBlockBuilder requires an unrefined starting grid.");
     }
-    // Conformity check for touching boxes. With disjoint boxes, a pair
-    // either is fully separated, shares an edge/corner, or shares a 2D
-    // face. The shared refined entities (corners along a shared edge,
-    // corners+faces on a shared face) coincide bitwise only if the
-    // subdivision factors match in the *shared* directions: the overlap
-    // dimension(s). The touch dimension(s) are parent-cell boundaries where
-    // corners are identified with level zero regardless. Subdivisions in a
-    // dimension where the boxes neither touch nor overlap are unconstrained
-    // (e.g. the out-of-face direction of two face-sharing boxes).
-    for (std::size_t i = 0; i < requests.size(); ++i) {
-        for (std::size_t j = i + 1; j < requests.size(); ++j) {
-            const auto& a = requests[i];
-            const auto& b = requests[j];
-            // Only boxes refining the same parent grid live in a common
-            // Cartesian index space; their IJK extents are comparable. Boxes
-            // with different parents (e.g. a nested box vs a top-level box)
-            // are indexed in different spaces and cannot touch by construction.
-            if (a.parentGridName != b.parentGridName) {
-                continue;
-            }
-            // The boxes share an entity (corner/edge/face) only if they
-            // touch-or-overlap in every dimension; a gap in any dimension
-            // means they are fully separated and impose no constraint.
-            bool interacts = true;
-            for (int c = 0; c < 3; ++c) {
-                const bool gap = (a.endIJK[c] < b.startIJK[c]) || (b.endIJK[c] < a.startIJK[c]);
-                interacts = interacts && !gap;
-            }
-            if (!interacts) {
-                continue;
-            }
-            // Classify how the two boxes meet. They interact (no gap in any
-            // direction), so each direction is either an *overlap* (their
-            // projections overlap) or a *touch* (they abut). A pair that
-            // overlaps in two directions and touches in the third shares a 2-D
-            // face; the two overlap directions are the *in-face* directions and
-            // the touch direction is perpendicular. Conformity constrains only
-            // the in-face directions.
-            int overlapCount = 0;
-            for (int c = 0; c < 3; ++c) {
-                const bool overlap = (a.startIJK[c] < b.endIJK[c]) && (b.startIJK[c] < a.endIJK[c]);
-                if (overlap) {
-                    ++overlapCount;
-                }
-            }
-            // Scan the overlap directions where the subdivisions differ.
-            bool anyDiffer = false;
-            bool anyIncompatible = false;
-            int incompatDir = -1;
-            // Cleanly nested: the *same* box is finer-or-equal in every differing
-            // overlap direction (so one box is uniformly the finer side and the
-            // mosaic has a well-defined coarse side).
-            bool aFinerOrEqualAll = true;
-            bool bFinerOrEqualAll = true;
-            for (int c = 0; c < 3; ++c) {
-                const bool overlap = (a.startIJK[c] < b.endIJK[c]) && (b.startIJK[c] < a.endIJK[c]);
-                if (!overlap || a.cellsPerDim[c] == b.cellsPerDim[c]) {
-                    continue;
-                }
-                anyDiffer = true;
-                const int na = a.cellsPerDim[c];
-                const int nb = b.cellsPerDim[c];
-                const int hi = (na > nb) ? na : nb;
-                const int lo = (na > nb) ? nb : na;
-                if (lo <= 0 || hi % lo != 0) {
-                    anyIncompatible = true;
-                    incompatDir = c;
-                }
-                if (na < nb) { aFinerOrEqualAll = false; }
-                if (nb < na) { bFinerOrEqualAll = false; }
-            }
-            if (!anyDiffer) {
-                continue;                       // equal in every shared direction
-            }
-            if (anyIncompatible) {
-                const int na = a.cellsPerDim[incompatDir];
-                const int nb = b.cellsPerDim[incompatDir];
-                OPM_THROW(std::logic_error,
-                    "Refinement boxes '" + a.name + "' and '" + b.name +
-                    "' meet with incompatible subdivisions in direction " +
-                    std::to_string(incompatDir) + " (" + std::to_string(na) + " vs " +
-                    std::to_string(nb) + "); neither is a multiple of the other, so the shared "
-                    "interface cannot be made conformal. Use equal subdivisions in the shared "
-                    "direction(s).");
-            }
-            // Compatible (every differing overlap factor is a multiple of the
-            // other). Supported only as a 2-D sub-face mosaic on a shared face
-            // (overlapCount == 2) with one box uniformly the finer side
-            // (cleanly nested): the coarser side's interface cells become
-            // >6-face hexes tiled by the finer side's sub-faces (assembled in
-            // assembleLeafGrid). Edge/corner contact (a 1-D mosaic)
-            // and a mixed nesting (each box finer in a different direction) are
-            // not implemented.
-            const bool cleanlyNested = aFinerOrEqualAll || bFinerOrEqualAll;
-            if (overlapCount == 2 && cleanlyNested) {
-                continue;                       // supported compatible face mosaic
-            }
-            OPM_THROW(std::logic_error,
-                "Refinement boxes '" + a.name + "' and '" + b.name +
-                "' meet with different but compatible subdivisions, but in an unsupported "
-                "configuration (" + (overlapCount == 2
-                    ? std::string("mixed nesting -- each box is finer in a different in-face "
-                                  "direction")
-                    : std::string("edge/corner contact, which would need a 1-D mosaic")) +
-                "). Only a face-sharing pair with one box uniformly finer is supported; that "
-                "is not implemented for this case yet. Use equal subdivisions in the shared "
-                "direction(s).");
-        }
-    }
+    // Touching boxes need no conformity check here. Corners on a shared face or
+    // edge coincide bitwise where the subdivisions agree, being resampled from
+    // the same parent description by the same arithmetic, and are merged by the
+    // leaf assembly. Boxes sharing a face with different in-face subdivisions get
+    // a sub-face mosaic when one side is uniformly finer by whole multiples, and
+    // the overlay of both subdivisions otherwise. Boxes that meet only at an edge
+    // or a corner share no face, so different subdivisions along it just leave
+    // nodes of one side on the edge (the leaf grid is face-conformal). Graded
+    // boxes may still not touch another box (checked in the leaf assembly).
 
     auto& storage = grid.currentData();
     // The refinement is "distributed" (rank-interior: only the owning rank
