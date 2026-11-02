@@ -1426,8 +1426,8 @@ BOOST_AUTO_TEST_CASE(faultInsideBoxReachesCellsAcrossThrow)
 }
 
 // Two boxes that meet only through a throw, with in-face subdivisions that do
-// not nest: refused, rather than sealing the interface between them.
-BOOST_AUTO_TEST_CASE(boxesMeetingOnlyAcrossThrowMustNest)
+// not nest: the interface is cut along both subdivisions.
+BOOST_AUTO_TEST_CASE(boxesMeetingOnlyAcrossThrowOverlay)
 {
     auto depth = [](int i_, int j_, int k_) {
         (void)j_;
@@ -1436,18 +1436,35 @@ BOOST_AUTO_TEST_CASE(boxesMeetingOnlyAcrossThrowMustNest)
     };
     auto parent = makeVerticalPillarGrid({4, 2, 8}, depth);
 
-    Dune::CpGrid grid;
-    auto rawParent = parent.raw();
-    grid.processEclipseFormat(rawParent, false);
+    const auto build = [&](const std::array<int,3>& factorsA, const std::array<int,3>& factorsB,
+                           double* volumeBefore) {
+        auto grid = std::make_unique<Dune::CpGrid>();
+        auto rawParent = parent.raw();
+        grid->processEclipseFormat(rawParent, false);
+        if (volumeBefore) {
+            *volumeBefore = totalVolume(*grid);
+        }
+        useConformingBuilder(*grid, std::make_unique<Opm::Refinement::ConformingBlockBuilder>(
+            parent.dims, parent.coord, parent.zcorn, parent.actnum));
+        grid->addLgrsUpdateLeafView({factorsA, factorsB},
+                                    {{0,0,6}, {2,0,3}},
+                                    {{2,2,8}, {4,2,5}},
+                                    {"A", "B"});
+        return grid;
+    };
 
-    useConformingBuilder(grid, std::make_unique<Opm::Refinement::ConformingBlockBuilder>(
-        parent.dims, parent.coord, parent.zcorn, parent.actnum));
+    // The interface area with equal in-face subdivisions, for reference
+    const double expectedArea = levelInterface(*build({2,6,6}, {2,6,6}, nullptr), 1, 2).first;
+    BOOST_REQUIRE_GT(expectedArea, 0.0);
 
-    BOOST_CHECK_THROW(grid.addLgrsUpdateLeafView({{2,3,2}, {2,2,3}},
-                                                 {{0,0,6}, {2,0,3}},
-                                                 {{2,2,8}, {4,2,5}},
-                                                 {"A", "B"}),
-                      std::invalid_argument);
+    double volumeBefore = 0.0;
+    const auto grid = build({2,3,2}, {2,2,3}, &volumeBefore);
+    BOOST_REQUIRE_EQUAL(grid->maxLevel(), 2);
+    BOOST_CHECK_CLOSE(totalVolume(*grid), volumeBefore, 1e-8);
+    BOOST_CHECK_SMALL(maxClosure(*grid), 1e-9);
+    checkEveryInteriorFaceTwoSided(*grid);
+    BOOST_CHECK_CLOSE(levelInterface(*grid, 1, 2).first, expectedArea, 1e-8);
+    BOOST_CHECK_CLOSE(levelInterface(*grid, 2, 1).first, expectedArea, 1e-8);
 }
 
 BOOST_AUTO_TEST_CASE(faultNotOnBoxBoundaryBuilds)

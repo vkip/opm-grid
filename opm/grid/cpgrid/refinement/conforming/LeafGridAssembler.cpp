@@ -1181,11 +1181,28 @@ assembleLeafGrid(std::vector<std::shared_ptr<CpGridData>>& storage,
     std::vector<SyntheticFace> syntheticFaces;
     std::vector<std::array<int,2>> splitKeys;    // {box, ordinal} per leaf corner past the history
     if (!faultedSides.empty() || !interiorFaults.empty() || !overlayFaces.empty()) {
-        // coord -> leaf corner index, over the current pool (exact match: the
-        // box-boundary corners are produced by identical resampling arithmetic).
+        // coord -> leaf corner index, over the current pool. Box-boundary corners
+        // are produced by identical resampling arithmetic and match exactly; the
+        // split vertices of a helper grid with other subdivisions than the box
+        // (non-nesting boxes across a fault) can differ from them in the last
+        // bits, so a corner within a tolerance far below any cell size is reused.
         std::map<std::array<double,3>, int> cornerByCoord;
+        double magnitude = 0.0;
         for (int c = 0; c < static_cast<int>(leafCorners.size()); ++c) {
-            cornerByCoord[coordKey(leafCorners[c])] = c;
+            const auto key = coordKey(leafCorners[c]);
+            cornerByCoord[key] = c;
+            for (const double x : key) {
+                magnitude = std::max(magnitude, std::abs(x));
+            }
+        }
+        const double snap = std::max(1.0e-9, 1.0e-12 * magnitude);
+        const auto cell = [snap](const std::array<double,3>& x) {
+            return std::array<long long,3>{ std::llround(x[0] / snap), std::llround(x[1] / snap),
+                                            std::llround(x[2] / snap) };
+        };
+        std::map<std::array<long long,3>, std::vector<int>> cornersBySnapCell;
+        for (const auto& [key, c] : cornerByCoord) {
+            cornersBySnapCell[cell(key)].push_back(c);
         }
 
         // Map a coordinate to a leaf-pool corner (dedup; append if new).
@@ -1195,10 +1212,29 @@ assembleLeafGrid(std::vector<std::shared_ptr<CpGridData>>& storage,
             if (pit != cornerByCoord.end()) {
                 return pit->second;
             }
+            const auto home = cell(key3);
+            for (long long di = -1; di <= 1; ++di) {
+                for (long long dj = -1; dj <= 1; ++dj) {
+                    for (long long dk = -1; dk <= 1; ++dk) {
+                        const auto it = cornersBySnapCell.find({home[0] + di, home[1] + dj, home[2] + dk});
+                        if (it == cornersBySnapCell.end()) {
+                            continue;
+                        }
+                        for (const int c : it->second) {
+                            const auto& x = leafCorners[c].center();
+                            if (std::abs(x[0] - nd[0]) <= snap && std::abs(x[1] - nd[1]) <= snap
+                                && std::abs(x[2] - nd[2]) <= snap) {
+                                return c;
+                            }
+                        }
+                    }
+                }
+            }
             const int idx = static_cast<int>(leafCorners.size());
             leafCorners.push_back(Dune::cpgrid::Geometry<0,3>(
                 Dune::FieldVector<double,3>{ nd[0], nd[1], nd[2] }));
             cornerByCoord.emplace(key3, idx);
+            cornersBySnapCell[home].push_back(idx);
             return idx;
         };
         // The pieces of a box cell's side toward one neighbour: a coarse cell, the
@@ -1228,15 +1264,41 @@ assembleLeafGrid(std::vector<std::shared_ptr<CpGridData>>& storage,
 
         for (const auto& [b, axis, side] : faultedSides) {
             const auto rangeIt = acrossRange.find(std::make_tuple(b, axis, side));
+            // The helper grid is refined to the box's in-face subdivisions, or for
+            // boxes across whose subdivisions do not nest with them, to their least
+            // common multiple, so that every piece lies in one refined cell on each side.
+            const int u0 = (axis == 0) ? 1 : 0;
+            const int v0 = (axis == 2) ? 1 : 2;
+            std::array<int,3> common = boxes[b].factors;
+            if (const auto across = boxesAcross.find(std::make_tuple(b, axis, side));
+                across != boxesAcross.end() && !boxes[b].graded) {
+                for (const int nbBox : across->second) {
+                    if (boxes[nbBox].graded) {
+                        continue;
+                    }
+                    for (const int c : {u0, v0}) {
+                        common[c] = std::lcm(common[c], boxes[nbBox].factors[c]);
+                    }
+                }
+            }
+            BlockRefinement helperRequest = requests[b];
+            if (common != boxes[b].factors) {
+                helperRequest.cellsPerDim = common;
+                helperRequest.minpvRemoved.clear();
+            }
             const auto conns = faultedBoundaryConnections(
-                parentDims, coord, zcorn, actnum, requests[b],
+                parentDims, coord, zcorn, actnum, helperRequest,
                 axis, side, /*edgeConformal=*/true,
                 (rangeIt != acrossRange.end()) ? &rangeIt->second : nullptr);
             const auto& rd = boxes[b].refinedDims;
             for (const auto& conn : conns) {
-                const int refinedCart = conn.boxCell[0]
-                                      + rd[0]*conn.boxCell[1]
-                                      + rd[0]*rd[1]*conn.boxCell[2];
+                std::array<int,3> boxCell = conn.boxCell;
+                for (int c = 0; c < 3; ++c) {
+                    boxCell[c] = boxCell[c] * boxes[b].factors[c] / common[c];
+                }
+                const int refinedCart = boxCell[0]
+                                      + rd[0]*boxCell[1]
+                                      + rd[0]*rd[1]*boxCell[2];
                 auto cit = refinedCartToCell[b].find(refinedCart);
                 if (cit == refinedCartToCell[b].end()) {
                     continue; // refined boundary cell inactive
@@ -1283,28 +1345,23 @@ assembleLeafGrid(std::vector<std::shared_ptr<CpGridData>>& storage,
                         }
                         const auto& facThis = boxes[b].factors;
                         const auto& facN    = boxes[nbBox].factors;
-                        // Boxes that meet only through the throw miss the builder's
-                        // IJK-contact guard; without nesting both sides would skip.
+                        // One side emits the interface: the finer one if it nests the
+                        // other, else the lower box index.
                         const auto nests = [u, v](const auto& fine, const auto& coarse) {
                             return fine[u] % coarse[u] == 0 && fine[v] % coarse[v] == 0;
                         };
-                        if (!nests(facThis, facN) && !nests(facN, facThis)) {
-                            OPM_THROW(std::invalid_argument,
-                                "Refinement '" + requests[b].name + "' meets '"
-                                + requests[nbBox].name + "' across a fault with in-face "
-                                "subdivisions that do not nest. Use equal subdivisions, or "
-                                "make one a multiple of the other.");
-                        }
                         if (facThis[u] == facN[u] && facThis[v] == facN[v]) {
                             if (b >= nbBox) {
                                 continue;        // equal: lower box index owns
                             }
                         }
-                        else if (!(facThis[u] >= facN[u] && facThis[v] >= facN[v])) {
+                        else if (nests(facN, facThis)) {
                             continue;            // coarser side: the finer references us
                         }
-                        // (Nesting is checked above, so facThis is a multiple of facN
-                        // in the in-face directions.)
+                        else if (!nests(facThis, facN) && b >= nbBox) {
+                            continue;            // no nesting: lower box index owns
+                        }
+                        // The helper grid's subdivision is a multiple of both sides'.
                         const std::array<int,3> pijk = {
                             conn.coarseNeighborCart % dims0[0],
                             (conn.coarseNeighborCart / dims0[0]) % dims0[1],
@@ -1317,8 +1374,8 @@ assembleLeafGrid(std::vector<std::shared_ptr<CpGridData>>& storage,
                         // neighbour's boundary layer facing box `b`.
                         std::array<int,3> sN{};
                         sN[axis] = (side > 0) ? 0 : (facN[axis] - 1);
-                        sN[u] = conn.coarseNeighborSub[u] * facN[u] / facThis[u];
-                        sN[v] = conn.coarseNeighborSub[v] * facN[v] / facThis[v];
+                        sN[u] = conn.coarseNeighborSub[u] * facN[u] / common[u];
+                        sN[v] = conn.coarseNeighborSub[v] * facN[v] / common[v];
                         std::array<int,3> latN{};
                         for (int d = 0; d < 3; ++d) {
                             latN[d] = (pijk[d] - startN[d]) * facN[d] + sN[d];
@@ -1556,7 +1613,21 @@ assembleLeafGrid(std::vector<std::shared_ptr<CpGridData>>& storage,
                     std::reverse(piece.begin(), piece.end());
                 }
             }
+            // Pieces with no area, where helper cells only touch along a line, are dropped
+            {
+                const double cellArea = std::pow(boxCells[group.boxCellLevel].volume(), 2.0 / 3.0);
+                std::vector<std::vector<int>> kept;
+                for (auto& piece : group.pieces) {
+                    if (polygonGeometry(coordinates(piece)).area > 1.0e-10 * cellArea) {
+                        kept.push_back(std::move(piece));
+                    }
+                }
+                group.pieces = std::move(kept);
+            }
             std::vector<std::vector<int>> faces;
+            if (group.pieces.empty()) {
+                continue;
+            }
             if (group.pieces.size() == 1) {
                 faces = std::move(group.pieces);
             }
@@ -1576,6 +1647,34 @@ assembleLeafGrid(std::vector<std::shared_ptr<CpGridData>>& storage,
                 syntheticFaces.push_back(SyntheticFace{
                     boxLeaf, neighborLeaf, std::move(pts), pg.normal, pg.center,
                     pg.area, faceTagOf(axis), side, group.box});
+            }
+        }
+
+        // Split corners only dropped pieces used are removed again
+        {
+            const int firstNew = static_cast<int>(leafCornerHistory.size());
+            std::vector<int> renumbered(leafCorners.size() - firstNew, -1);
+            for (const auto& sf : syntheticFaces) {
+                for (const int p : sf.points) {
+                    if (p >= firstNew) {
+                        renumbered[p - firstNew] = 0;
+                    }
+                }
+            }
+            int next = firstNew;
+            for (std::size_t c = 0; c < renumbered.size(); ++c) {
+                if (renumbered[c] == 0) {
+                    leafCorners[next] = leafCorners[firstNew + c];
+                    renumbered[c] = next++;
+                }
+            }
+            leafCorners.resize(next);
+            for (auto& sf : syntheticFaces) {
+                for (int& p : sf.points) {
+                    if (p >= firstNew) {
+                        p = renumbered[p - firstNew];
+                    }
+                }
             }
         }
         numLeafCorners = static_cast<int>(leafCorners.size());
