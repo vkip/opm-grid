@@ -122,6 +122,30 @@ void addWellConnections(GraphOfGrid<Dune::CpGrid>& gog,
                         const Dune::cpgrid::WellConnections& wells,
                         bool checkWellIntersections=true);
 
+/// \brief Represent the work of the wells in the graph used for partitioning
+///
+/// \param gog The graph. If wells are contracted (wellsContracted==true),
+///            the wells must already have been added to it.
+/// \param wells The wells.
+/// \param wellWork Estimated work of each well, by name, in units of well segments
+///            (e.g. the segments averaged over the time the well is open). Wells not in
+///            it get no work. If empty, the work of a well is its number of segments
+///            (1 for a standard well) if it is open or has produced or injected.
+/// \param wellWorkWeight Vertex weight added per unit of work, in units of the weight
+///            of one cell. A contracted well gets it on its vertex, otherwise it
+///            is spread evenly over the well's perforated cells. 0 disables it.
+/// \param wellEdgeWeight Only if the wells are not contracted: weight of edges added
+///            between consecutive connections of each well, in units of the median
+///            edge weight of the graph. Discourages, but does not prevent, splitting
+///            wells over processes. 0 disables it.
+/// \param wellsContracted Whether the wells are contracted to single vertices.
+void addWellWorkToGraph(GraphOfGrid<Dune::CpGrid>& gog,
+                        const std::vector<Dune::cpgrid::OpmWellType>& wells,
+                        const std::unordered_map<std::string, double>& wellWork,
+                        double wellWorkWeight,
+                        double wellEdgeWeight,
+                        bool wellsContracted);
+
 /// \brief Correct gIDtoRank's data about well cells
 ///
 /// gIDtoRank's entries come from Zoltan partitioner's export list

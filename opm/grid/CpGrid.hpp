@@ -57,7 +57,10 @@
 
 #include <opm/grid/utility/OpmWellType.hpp>
 
+#include <map>
 #include <set>
+#include <string>
+#include <unordered_map>
 
 namespace Opm
 {
@@ -724,6 +727,14 @@ namespace Dune
         unsigned int numBoundarySegments() const;
 
         void setPartitioningParams(const std::map<std::string,std::string>& params);
+
+        /// \brief Set the estimated work of each well for load balancing, as well name to
+        /// work in units of well segments. Used by the 'zoltanwell' partitioner when the
+        /// partitioning parameter "WellWorkWeight" is set (see Opm::addWellWorkToGraph).
+        void setWellWork(const std::unordered_map<std::string,double>& wellWork);
+
+        /// \brief The estimated work of each well for load balancing (see setWellWork()).
+        const std::unordered_map<std::string,double>& wellWork() const;
 
         // loadbalance is not part of the grid interface therefore we skip it.
 
@@ -1535,6 +1546,7 @@ namespace Dune
          * @brief Partitioning parameters
          */
         std::map<std::string,std::string> partitioningParams;
+        std::unordered_map<std::string,double> wellWork_;
 
     }; // end Class CpGrid
 

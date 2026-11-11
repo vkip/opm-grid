@@ -28,6 +28,11 @@
 #include <opm/grid/common/CommunicationUtils.hpp>
 #include <opm/grid/common/ZoltanPartition.hpp> // function scatterExportInformation
 #include <opm/grid/common/ZoltanGraphFunctions.hpp> // makeImportAndExportLists when allowDistributedWells==true
+#include <opm/grid/cpgrid/CpGridData.hpp>
+
+#include <opm/input/eclipse/Schedule/MSW/WellSegments.hpp>
+#include <opm/input/eclipse/Schedule/Well/Well.hpp>
+#include <opm/input/eclipse/Schedule/Well/WellConnections.hpp>
 
 namespace Opm {
 
@@ -187,6 +192,101 @@ void addWellConnections(GraphOfGrid<Dune::CpGrid>& gog,
     for (const auto& w : wells)
     {
         gog.addWell(w, checkWellIntersections);
+    }
+}
+
+void addWellWorkToGraph(GraphOfGrid<Dune::CpGrid>& gog,
+                        const std::vector<Dune::cpgrid::OpmWellType>& wells,
+                        const std::unordered_map<std::string, double>& wellWork,
+                        double wellWorkWeight,
+                        double wellEdgeWeight,
+                        bool wellsContracted)
+{
+    const bool addWork = wellWorkWeight > 0;
+    const bool addEdges = wellEdgeWeight > 0 && !wellsContracted;
+    if ((!addWork && !addEdges) || gog.size() == 0)
+    {
+        return;
+    }
+
+    // Compressed cell index from the cartesian index, as in WellConnections
+    const auto& grid = gog.getGrid();
+    const auto& cpgdim = grid.currentData().front()->logicalCartesianSize();
+    const auto& globalCell = grid.currentData().front()->globalCell();
+    std::vector<int> cartesian_to_compressed(cpgdim[0]*cpgdim[1]*cpgdim[2], -1);
+    for (std::size_t i = 0; i < globalCell.size(); ++i)
+    {
+        cartesian_to_compressed[globalCell[i]] = i;
+    }
+
+    const double edgeWeight = addEdges ? wellEdgeWeight * gog.medianEdgeWeight() : 0.0;
+    std::vector<int> cells;
+    for (const auto& well : wells)
+    {
+        double units = 0.0;
+        if (wellWork.empty())
+        {
+            if (well.getStatus() == Opm::Well::Status::OPEN || well.hasProduced() || well.hasInjected())
+            {
+                units = well.isMultiSegment() ? well.getSegments().size() : 1;
+            }
+        }
+        else if (const auto it = wellWork.find(well.name()); it != wellWork.end())
+        {
+            units = it->second;
+        }
+        if (units <= 0)
+        {
+            continue;
+        }
+        // Active perforated cells, in connection order (along the well)
+        cells.clear();
+        const auto& connections = well.getConnections();
+        for (std::size_t c = 0; c < connections.size(); ++c)
+        {
+            const auto& connection = connections.get(c);
+            if (connection.get_lgr_level() != 0)
+            {
+                continue;
+            }
+            const int cart = connection.getI() + cpgdim[0]*(connection.getJ() + cpgdim[1]*connection.getK());
+            if (cart < 0 || cart >= static_cast<int>(cartesian_to_compressed.size()))
+            {
+                continue;
+            }
+            const int cell = cartesian_to_compressed[cart];
+            if (cell >= 0 && (cells.empty() || cells.back() != cell))
+            {
+                cells.push_back(cell);
+            }
+        }
+        if (cells.empty())
+        {
+            continue;
+        }
+
+        if (addWork)
+        {
+            const double work = wellWorkWeight * units;
+            if (wellsContracted)
+            {
+                gog.addVertexWeight(cells.front(), work);
+            }
+            else
+            {
+                for (const int cell : cells)
+                {
+                    gog.addVertexWeight(cell, work / cells.size());
+                }
+            }
+        }
+        if (addEdges)
+        {
+            for (std::size_t c = 1; c < cells.size(); ++c)
+            {
+                gog.addEdgeWeight(cells[c - 1], cells[c], edgeWeight);
+            }
+        }
     }
 }
 
@@ -547,10 +647,16 @@ zoltanPartitioningWithGraphOfGrid(const Dune::CpGrid& grid,
     setDefaultZoltanParameters(zz);
     Zoltan_Set_Param(zz, "IMBALANCE_TOL", std::to_string(zoltanImbalanceTol).c_str());
     int layers = 0; // extra layers of cells attached to wells to distance them from boundary
+    double wellWorkWeight = 0.0; // see addWellWorkToGraph
+    double wellEdgeWeight = 0.0;
     for (const auto& [key, value] : params)
     {
         if (key=="EnvelopeWellLayers")
             layers = std::stoi(value);
+        else if (key=="WellWorkWeight")
+            wellWorkWeight = std::stod(value);
+        else if (key=="WellEdgeWeight")
+            wellEdgeWeight = std::stod(value);
         else
             Zoltan_Set_Param(zz, key.c_str(), value.c_str());
     }
@@ -568,6 +674,9 @@ zoltanPartitioningWithGraphOfGrid(const Dune::CpGrid& grid,
         // skip cell contraction if wells can be distributed over multiple processes
         addWellConnections(gog, wellConnections);
         gog.addNeighboringCellsToWells(layers);
+    }
+    if (wells && !partitionIsEmpty) {
+        addWellWorkToGraph(gog, *wells, grid.wellWork(), wellWorkWeight, wellEdgeWeight, !allowDistributedWells);
     }
 
     // call partitioner
@@ -673,6 +782,7 @@ namespace {
 std::tuple<int, std::vector<int>>
 applySerialZoltan (const Dune::CpGrid& grid,
                    const Dune::cpgrid::WellConnections& wellConnections,
+                   const std::vector<Dune::cpgrid::OpmWellType>* wells,
                    const double* transmissibilities,
                    int numParts,
                    Dune::EdgeWeightMethod edgeWeightMethod,
@@ -703,9 +813,15 @@ applySerialZoltan (const Dune::CpGrid& grid,
     Zoltan_Set_Param(zz, "IMBALANCE_TOL", std::to_string(zoltanImbalanceTol).c_str());
     Zoltan_Set_Param(zz, "NUM_GLOBAL_PARTS", std::to_string(numParts).c_str());
     int layers = 0; // extra layers of cells attached to wells to distance them from boundary
+    double wellWorkWeight = 0.0; // see addWellWorkToGraph
+    double wellEdgeWeight = 0.0;
     for (const auto& [key, value] : params) {
         if (key == "EnvelopeWellLayers")
             layers = std::stoi(value);
+        else if (key == "WellWorkWeight")
+            wellWorkWeight = std::stod(value);
+        else if (key == "WellEdgeWeight")
+            wellEdgeWeight = std::stod(value);
         else
             Zoltan_Set_Param(zz, key.c_str(), value.c_str());
     }
@@ -716,6 +832,9 @@ applySerialZoltan (const Dune::CpGrid& grid,
         // skip cell contraction if wells can be distributed over multiple processes
         addWellConnections(gog, wellConnections);
         gog.addNeighboringCellsToWells(layers);
+    }
+    if (wells) {
+        addWellWorkToGraph(gog, *wells, grid.wellWork(), wellWorkWeight, wellEdgeWeight, !allowDistributedWells);
     }
 
     // call partitioner
@@ -782,6 +901,7 @@ zoltanSerialPartitioningWithGraphOfGrid(const Dune::CpGrid& grid,
     if (cc.rank() == root) {
         std::tie(rc, gIDtoRank) = applySerialZoltan(grid,
                                                     wellConnections,
+                                                    wells,
                                                     transmissibilities,
                                                     cc.size(),
                                                     edgeWeightMethod,

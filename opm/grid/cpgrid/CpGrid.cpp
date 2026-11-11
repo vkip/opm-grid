@@ -1024,6 +1024,16 @@ void CpGrid::setPartitioningParams(const std::map<std::string,std::string>& para
     partitioningParams = params;
 }
 
+void CpGrid::setWellWork(const std::unordered_map<std::string,double>& wellWork)
+{
+    wellWork_ = wellWork;
+}
+
+const std::unordered_map<std::string,double>& CpGrid::wellWork() const
+{
+    return wellWork_;
+}
+
 const typename CpGridTraits::Communication& Dune::CpGrid::comm () const
 {
     return current_data_->back()->ccobj_;

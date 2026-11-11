@@ -150,6 +150,17 @@ public:
     /// If either gID is in a well, well's ID can be returned if it is smaller.
     int contractVertices (int gID1, int gID2);
 
+    /// \brief Add to the weight of the vertex of the cell with this global ID
+    /// (the well's vertex if the cell is in a contracted well).
+    void addVertexWeight (int gID, WeightType weight);
+
+    /// \brief Add an edge, or add to the weight of an existing edge, between the
+    /// vertices of two cells. Does nothing if both cells are in the same vertex.
+    void addEdgeWeight (int gID1, int gID2, WeightType weight);
+
+    /// \brief Median of the edge weights of the graph, 0 if there are no edges.
+    WeightType medianEdgeWeight () const;
+
     /// \brief Register the well to the list of wells
     ///
     /// If checkIntersection==true, it checks if any of well's cells is

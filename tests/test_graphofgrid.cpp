@@ -659,6 +659,81 @@ namespace {
     };
 } // end anonymous namespace
 
+// Well work as vertex weights, and edges along wells
+BOOST_AUTO_TEST_CASE(WellWorkInGraph)
+{
+    Dune::CpGrid grid;
+    std::array<int,3> dims{2,2,2};
+    std::array<double,3> size{1.,1.,1.};
+    grid.createCartesian(dims,size);
+    if (grid.size(0)==0)
+        return;
+
+    // An open standard well through cells 0, 2, 6 (in this order) and a shut well in cell 7
+    std::vector<Dune::cpgrid::OpmWellType> wells;
+    auto wellCon = std::make_shared<Opm::WellConnections>();
+    wellCon->add(createConnection(0,0,0));
+    wellCon->add(createConnection(0,1,0));
+    wellCon->add(createConnection(0,1,1));
+    wells.push_back(createWell("open"));
+    wells[0].updateConnections(wellCon,true);
+    wells[0].updateStatus(Opm::Well::Status::OPEN);
+    wellCon = std::make_shared<Opm::WellConnections>();
+    wellCon->add(createConnection(1,1,1));
+    wells.push_back(createWell("shut"));
+    wells[1].updateConnections(wellCon,true);
+
+    {
+        // Wells not contracted: work spread over the well cells, edges along the well
+        Opm::GraphOfGrid gog(grid);
+        BOOST_CHECK_EQUAL(gog.medianEdgeWeight(), 1.0f);
+        Opm::addWellWorkToGraph(gog, wells, {}, 3.0, 2.0, false);
+        BOOST_CHECK_EQUAL(gog.getVertex(0).weight, 2.0f);
+        BOOST_CHECK_EQUAL(gog.getVertex(2).weight, 2.0f);
+        BOOST_CHECK_EQUAL(gog.getVertex(6).weight, 2.0f);
+        BOOST_CHECK_EQUAL(gog.getVertex(7).weight, 1.0f);
+        BOOST_CHECK_EQUAL(gog.getVertex(1).weight, 1.0f);
+        BOOST_CHECK_EQUAL(gog.edgeList(0).at(2), 3.0f);
+        BOOST_CHECK_EQUAL(gog.edgeList(2).at(0), 3.0f);
+        BOOST_CHECK_EQUAL(gog.edgeList(2).at(6), 3.0f);
+        BOOST_CHECK_EQUAL(gog.edgeList(6).at(2), 3.0f);
+        BOOST_CHECK_EQUAL(gog.edgeList(0).count(6), 0u);
+        BOOST_CHECK_EQUAL(gog.edgeList(0).at(1), 1.0f);
+    }
+    {
+        // Contracted wells: work on the well vertex, no extra edges
+        Opm::GraphOfGrid gog(grid);
+        Dune::cpgrid::WellConnections wellConnections(wells, std::unordered_map<std::string, std::set<int>>(), grid);
+        Opm::addWellConnections(gog, wellConnections);
+        BOOST_REQUIRE_EQUAL(gog.getVertex(0).weight, 3.0f);
+        const auto edgesBefore = gog.edgeList(0);
+        Opm::addWellWorkToGraph(gog, wells, {}, 3.0, 2.0, true);
+        BOOST_CHECK_EQUAL(gog.getVertex(6).weight, 6.0f);
+        BOOST_CHECK_EQUAL(gog.getVertex(7).weight, 1.0f);
+        BOOST_CHECK(gog.edgeList(0) == edgesBefore);
+    }
+    {
+        // Explicit well work: overrides the status, wells not in the map get no work
+        Opm::GraphOfGrid gog(grid);
+        const std::unordered_map<std::string, double> wellWork{{"shut", 2.0}};
+        Opm::addWellWorkToGraph(gog, wells, wellWork, 3.0, 0.0, false);
+        BOOST_CHECK_EQUAL(gog.getVertex(0).weight, 1.0f);
+        BOOST_CHECK_EQUAL(gog.getVertex(7).weight, 7.0f);
+        BOOST_CHECK_EQUAL(gog.edgeList(0).at(2), 1.0f);
+    }
+    {
+        // Explicit edge and vertex weight updates
+        Opm::GraphOfGrid gog(grid);
+        gog.addEdgeWeight(0, 7, 5.0);
+        BOOST_CHECK_EQUAL(gog.edgeList(0).at(7), 5.0f);
+        BOOST_CHECK_EQUAL(gog.edgeList(7).at(0), 5.0f);
+        gog.addEdgeWeight(3, 3, 5.0);
+        BOOST_CHECK_EQUAL(gog.edgeList(3).count(3), 0u);
+        gog.addVertexWeight(4, 0.5);
+        BOOST_CHECK_EQUAL(gog.getVertex(4).weight, 1.5f);
+    }
+}
+
 #if HAVE_MPI
 // Create yet another small grid with wells and test graph properties.
 // This time wells are supplied via OpmWellType interface

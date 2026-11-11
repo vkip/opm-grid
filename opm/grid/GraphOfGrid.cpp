@@ -26,7 +26,9 @@
 #include <config.h>
 #include "GraphOfGrid.hpp"
 
+#include <algorithm>
 #include <numeric>
+#include <vector>
 
 namespace Opm {
 
@@ -252,6 +254,56 @@ int GraphOfGrid<Grid>::contractVertices (int gID1, int gID2)
     // erase the second vertex to conclude contraction
     graph.erase(gID2);
     return gID1;
+}
+
+template<typename Grid>
+void GraphOfGrid<Grid>::addVertexWeight (int gID, WeightType weight)
+{
+    const auto pgID = find(gID);
+    if (pgID == graph.end())
+    {
+        OPM_THROW(std::logic_error, "GraphOfGrid::addVertexWeight: gID is not in the graph!");
+    }
+    graph[pgID->first].weight += weight;
+}
+
+template<typename Grid>
+void GraphOfGrid<Grid>::addEdgeWeight (int gID1, int gID2, WeightType weight)
+{
+    const auto pgID1 = find(gID1);
+    const auto pgID2 = find(gID2);
+    if (pgID1 == graph.end() || pgID2 == graph.end())
+    {
+        OPM_THROW(std::logic_error, "GraphOfGrid::addEdgeWeight: gID is not in the graph!");
+    }
+    const int v1 = pgID1->first;
+    const int v2 = pgID2->first;
+    if (v1 == v2)
+    {
+        return;
+    }
+    graph[v1].edges[v2] += weight;
+    graph[v2].edges[v1] += weight;
+}
+
+template<typename Grid>
+typename GraphOfGrid<Grid>::WeightType GraphOfGrid<Grid>::medianEdgeWeight () const
+{
+    std::vector<WeightType> weights;
+    for (const auto& vertex : graph)
+    {
+        for (const auto& edge : vertex.second.edges)
+        {
+            weights.push_back(edge.second);
+        }
+    }
+    if (weights.empty())
+    {
+        return 0;
+    }
+    auto mid = weights.begin() + weights.size() / 2;
+    std::nth_element(weights.begin(), mid, weights.end());
+    return *mid;
 }
 
 template<typename Grid>
